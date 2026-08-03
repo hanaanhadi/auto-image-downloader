@@ -1,0 +1,35 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated/working folders (downloaded assets, rendered episodes, temp render output)
+downloads/
+episodes/
+render/
+
+# Media files, wherever they end up
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.gif
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.wav
+
+# Generated data artifacts (transcripts, manifests, asset lists) -- not source code
+transcript.json
+transcript.srt
+slideshow_manifest.txt
+*_assets.txt
