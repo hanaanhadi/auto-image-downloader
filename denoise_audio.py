@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 Reusable audio cleanup step: reduces background noise (ffmpeg's FFT
-denoiser) and then loudness-matches the result back to the ORIGINAL file's
-measured integrated loudness, so the output sounds cleaner without sounding
-quieter or louder than the source.
+denoiser), then loudness-normalizes the result to the original level PLUS a
+boost (default +6 LUFS), capped at a loud-but-clean ceiling -- quiet source
+narration comes out clearly audible instead of just as quiet as the original,
+while a true-peak ceiling keeps it from clipping or sounding over-compressed.
 
 USAGE:
     python denoise_audio.py --input FILE --output FILE [--noise-reduction 12]
+        [--volume-boost 6] [--max-loudness -14]
 """
 
 import argparse
@@ -36,6 +38,13 @@ def main():
     ap.add_argument("--output", required=True)
     ap.add_argument("--noise-reduction", type=float, default=12.0,
                      help="afftdn noise-reduction amount in dB, 0-97 (default 12, moderate).")
+    ap.add_argument("--volume-boost", type=float, default=6.0,
+                     help="Loudness added on top of the original level, in LUFS (default 6). "
+                          "Set to 0 to just match the original level with no boost.")
+    ap.add_argument("--max-loudness", type=float, default=-14.0,
+                     help="Loudness ceiling in LUFS regardless of boost (default -14, loud but "
+                          "clean for spoken narration). Prevents over-compression on sources "
+                          "that were already loud to begin with.")
     args = ap.parse_args()
 
     src = Path(args.input)
@@ -53,10 +62,13 @@ def main():
         "-ar", "44100", str(tmp_denoised),
     ], check=True)
 
-    print("Matching loudness back to the original level ...")
+    target_i = min(orig_i + args.volume_boost, args.max_loudness)
+    target_tp = min(orig_tp, -1.5)  # clipping-safe ceiling regardless of source peak
+    print(f"Boosting loudness to {target_i:.1f} LUFS "
+          f"(original {orig_i:.1f} + {args.volume_boost:.1f} dB, capped at {args.max_loudness:.1f}) ...")
     subprocess.run([
         "ffmpeg", "-y", "-i", str(tmp_denoised),
-        "-af", f"loudnorm=I={orig_i}:TP={orig_tp}:LRA={orig_lra}:print_format=summary",
+        "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA={orig_lra}:print_format=summary",
         "-ar", "44100", "-c:a", "aac", "-b:a", "192k", str(out),
     ], check=True)
 
@@ -64,7 +76,7 @@ def main():
 
     print(f"Verifying output loudness ...")
     final_i, final_tp, _, _ = measure_loudness(out)
-    print(f"Output: integrated={final_i:.1f} LUFS (target was {orig_i:.1f}), true_peak={final_tp:.1f} dBTP")
+    print(f"Output: integrated={final_i:.1f} LUFS (target was {target_i:.1f}), true_peak={final_tp:.1f} dBTP")
     print(f"Done -> {out}")
 
 

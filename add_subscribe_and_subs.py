@@ -14,7 +14,10 @@ Requires ffmpeg/ffprobe on PATH.
 """
 
 import argparse
+import os
 import subprocess
+import tempfile
+import shutil
 from pathlib import Path
 
 SLIDE_IN = 0.35
@@ -36,7 +39,10 @@ def get_resolution(path):
          "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
         capture_output=True, text=True, check=True,
     )
-    w, h = out.stdout.strip().split(",")
+    # Some ffmpeg builds emit a trailing comma on csv=p=0 output (e.g.
+    # "1920,1080,") -- filter out the resulting empty field instead of
+    # assuming exactly two comma-separated values.
+    w, h = [v for v in out.stdout.strip().split(",") if v][:2]
     return int(w), int(h)
 
 
@@ -69,9 +75,14 @@ def progress_expr(T, dur):
 
 
 def escape_filter_path(path):
-    """Escape an absolute Windows path for embedding inside an ffmpeg filter
-    option string (colons and backslashes are filter-graph syntax)."""
-    return str(path).replace("\\", "/").replace(":", "\\:")
+    """Escape an absolute Windows path for embedding inside a single-quoted
+    ffmpeg filter option value (colons and backslashes are filter-graph
+    syntax). A literal apostrophe -- e.g. from an episode folder name like
+    "Bastogne's Ghost Battery" -- can't be escaped with a backslash inside
+    a single-quoted value; ffmpeg's own quoting rules require closing the
+    quote, inserting a backslash-escaped literal quote, then reopening it,
+    same as POSIX shell single-quote escaping."""
+    return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
 
 TITLE_FADE_IN = 0.6
@@ -101,11 +112,11 @@ def build_filter_complex(srt_path, times, dur, top_margin, right_margin,
         chain += f"[1:v]split={n}{split_labels};"
 
     if srt_path is not None:
-        outline = round(caption_fontsize * 0.11, 1)
-        shadow = round(caption_fontsize * 0.055, 1)
+        outline = round(caption_fontsize * 0.14, 1)
+        shadow = round(caption_fontsize * 0.06, 1)
         margin_v = round(video_height * 0.05)
         style = (
-            f"FontName=Arial,FontSize={caption_fontsize},PrimaryColour=&H00FFFFFF,"
+            f"FontName=Arial,Bold=-1,FontSize={caption_fontsize},PrimaryColour=&H00FFFFFF,"
             f"OutlineColour=&H00000000,BorderStyle=1,Outline={outline},Shadow={shadow},"
             f"Alignment=2,MarginV={margin_v}"
         )
@@ -196,6 +207,20 @@ def main():
     srt = None if (args.no_captions or not args.srt) else Path(args.srt).resolve()
     work_dir = out.parent
 
+    srt_temp_copy = None
+    if srt is not None and "'" in str(srt):
+        # The subtitles filter parses its `filename` argument with its own
+        # private sub-parser (separate from the outer filtergraph parser),
+        # which doesn't reliably honor the standard '\'' escape for a
+        # literal apostrophe -- it can swallow the quote AND merge the
+        # following :force_style=... option into the filename. Simplest
+        # robust fix: stage the SRT under a path with no apostrophe.
+        fd, temp_name = tempfile.mkstemp(suffix=".srt", prefix="subs_")
+        os.close(fd)
+        srt_temp_copy = Path(temp_name)
+        shutil.copyfile(srt, srt_temp_copy)
+        srt = srt_temp_copy
+
     duration = get_duration(video)
     width, height = get_resolution(video)
     print(f"Source: {duration:.2f}s @ {width}x{height}")
@@ -240,7 +265,11 @@ def main():
         str(out),
     ]
     print(" ".join(str(c) for c in cmd))
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        if srt_temp_copy is not None:
+            srt_temp_copy.unlink(missing_ok=True)
     print("Done ->", out)
 
 

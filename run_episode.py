@@ -29,6 +29,10 @@ USAGE:
         python run_episode.py --episode-name NAME --audio FILE --asset-list FILE
             [--min-size 20] [--noise-reduction 12] [--skip-denoise]
 
+    Or auto-source assets by topic instead of a curated URL list:
+        python run_episode.py --episode-name NAME --audio FILE --topic "search term"
+            [--search-images 40] [--search-videos 8]
+
     After reviewing episodes/NAME/images_pool/, continue with:
         python run_episode.py --episode-name NAME --resume
             [--transition-duration 5] [--width 1920] [--height 1080]
@@ -73,7 +77,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--episode-name", required=True)
     ap.add_argument("--audio", help="Required unless --resume.")
-    ap.add_argument("--asset-list", help="Required unless --resume.")
+    ap.add_argument("--asset-list", help="URL list file (old method). Give this OR --topic, unless --resume.")
+    ap.add_argument("--topic", default=None,
+                     help="Search term to auto-fetch images/video from Wikimedia/Openverse/"
+                          "Pexels/Pixabay (search_and_download.py) instead of a URL list. "
+                          "Give this OR --asset-list, unless --resume.")
+    ap.add_argument("--search-images", type=int, default=40,
+                     help="Max images to fetch when using --topic (default 40).")
+    ap.add_argument("--search-videos", type=int, default=8,
+                     help="Max video clips to fetch when using --topic (default 8, for manual "
+                          "reference -- not yet consumed by the slideshow builder).")
     ap.add_argument("--resume", action="store_true",
                      help="Skip setup/denoise/download and continue from the review "
                           "checkpoint using whatever's currently in images_pool/.")
@@ -81,7 +94,7 @@ def main():
     ap.add_argument("--transition-duration", type=float, default=5.0)
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
-    ap.add_argument("--caption-fontsize", type=int, default=20)
+    ap.add_argument("--caption-fontsize", type=int, default=32)
     ap.add_argument("--subscribe-duration", type=float, default=10.0)
     ap.add_argument("--subscribe-count", type=int, default=4)
     ap.add_argument("--target-slot-seconds", type=float, default=27.0)
@@ -117,8 +130,10 @@ def main():
         collected = sum(1 for _ in images_pool_dir.iterdir())
         print(f"Resuming with {collected} images already in {images_pool_dir}")
     else:
-        if not args.audio or not args.asset_list:
-            raise SystemExit("--audio and --asset-list are required unless --resume is given.")
+        if not args.audio:
+            raise SystemExit("--audio is required unless --resume is given.")
+        if bool(args.asset_list) == bool(args.topic):
+            raise SystemExit("Give exactly one of --asset-list or --topic (unless --resume).")
 
         # Step 1: copy audio in
         print(f"\n{'=' * 70}\n[1/{total_steps}] Setting up episode folder\n{'=' * 70}")
@@ -137,16 +152,25 @@ def main():
                 "--noise-reduction", str(args.noise_reduction),
             ])
 
-        # Step 3: download assets
+        # Step 3: download assets -- either from a curated URL list, or by
+        # auto-searching free/CC sources for the given topic
         downloads_dir = episode_dir / "downloads"
-        run_step(3, total_steps, "Downloading assets (images first, then videos)", [
-            PY, str(ROOT / "download_assets.py"), str(Path(args.asset_list).resolve()),
-            "--topic", args.episode_name, "--output", str(downloads_dir),
-            "--min-size", str(args.min_size),
-        ])
+        if args.topic:
+            run_step(3, total_steps, f"Searching + downloading assets for topic '{args.topic}'", [
+                PY, str(ROOT / "search_and_download.py"),
+                "--topic", args.topic, "--output", str(downloads_dir),
+                "--images", str(args.search_images), "--videos", str(args.search_videos),
+            ])
+            topic_root = downloads_dir  # fresh per-episode dir; only this topic lives under it
+        else:
+            run_step(3, total_steps, "Downloading assets (images first, then videos)", [
+                PY, str(ROOT / "download_assets.py"), str(Path(args.asset_list).resolve()),
+                "--topic", args.episode_name, "--output", str(downloads_dir),
+                "--min-size", str(args.min_size),
+            ])
+            topic_root = downloads_dir / args.episode_name
 
         # Collect downloaded images into a flat review folder
-        topic_root = downloads_dir / args.episode_name
         images_pool_dir.mkdir(exist_ok=True)
         collected = 0
         for img in topic_root.rglob("*"):
@@ -217,7 +241,7 @@ def main():
     cmd = [
         PY, str(ROOT / "add_subscribe_and_subs.py"),
         "--video", str(base_video), "--output", str(final_video),
-        "--srt", str(episode_dir / "transcript.srt"),
+        "--srt", str(episode_dir / "captions.srt"),
         "--caption-fontsize", str(args.caption_fontsize),
         "--subscribe-duration", str(args.subscribe_duration),
         "--subscribe-count", str(args.subscribe_count),

@@ -42,6 +42,13 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse, urljoin, unquote
 
+# Windows consoles default to a codepage (e.g. cp1252) that can't encode the
+# unicode symbols (arrow, checkmark, X) used in progress messages below --
+# without this, printing them crashes the whole run partway through.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     import requests
     from bs4 import BeautifulSoup
