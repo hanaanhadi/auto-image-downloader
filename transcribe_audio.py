@@ -123,8 +123,17 @@ def main():
     captions_path = out_dir / "captions.srt"
     write_srt(captions, captions_path)
 
+    # Raw word-level timestamps, kept separately from the grouped caption
+    # chunks above -- lets a downstream step (e.g. build_word_captions.py)
+    # build a different caption style later (word-by-word reveal, karaoke
+    # highlighting, etc.) without re-running Whisper.
+    words_path = out_dir / "words.json"
+    with open(words_path, "w", encoding="utf-8") as f:
+        json.dump(all_words, f, indent=2, ensure_ascii=False)
+
     print(f"\nSaved {len(results)} segments -> {json_path.name}, {srt_path.name}")
     print(f"Saved {len(captions)} short caption chunks -> {captions_path.name}")
+    print(f"Saved {len(all_words)} word timestamps -> {words_path.name}")
 
 
 if __name__ == "__main__":

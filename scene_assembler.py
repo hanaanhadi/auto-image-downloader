@@ -43,6 +43,19 @@ TRANSITION_MAP = {
     "wipeleft": "wipeleft",
     "wiperight": "wiperight",
     "hardcut": "fade",  # rendered with a near-zero duration below
+    # Extra native xfade transitions (all built into ffmpeg, no custom
+    # filter needed) for more cut variety per scene -- rough analogues to
+    # the viral-spec's "whip zoom" (zoomin), "snap zoom into diagram"
+    # (circleopen), "lens blur" (hblur), and "whip pan" (slideleft/right).
+    # There's no true torn-paper-edge wipe in ffmpeg; pixelize is the closest
+    # "glitchy tear" substitute without writing a custom mask filter.
+    "zoomin": "zoomin",
+    "circleopen": "circleopen",
+    "circleclose": "circleclose",
+    "hblur": "hblur",
+    "slideleft": "slideleft",
+    "slideright": "slideright",
+    "pixelize": "pixelize",
 }
 
 
@@ -123,6 +136,7 @@ def build_scene(scene, width, height, fps, work_dir, render_frames):
         fx.kinetic_typography(
             [tuple(p) for p in scene["phrases"]], width, height, fps, out,
             duration=dur, bg_color=scene.get("bg_color", "black"),
+            bg_image=scene.get("bg_image"),
             fontsize=scene.get("fontsize", 80), gap=scene.get("gap", 0.5),
             hold=scene.get("hold", 1.5), attribution=scene.get("attribution"),
         )
@@ -135,12 +149,19 @@ def build_scene(scene, width, height, fps, work_dir, render_frames):
         fx.title_card(
             scene["title"], scene.get("subtitle", ""), width, height, fps, out,
             duration=dur, bg_color=scene.get("bg_color", "0x1a1a1a"),
+            bg_image=scene.get("bg_image"),
         )
     elif t == "split":
         fx.split_screen(
             Path(scene["left"]), Path(scene["right"]), width, height, fps, out,
             duration=dur, left_caption=scene.get("left_caption"),
             right_caption=scene.get("right_caption"),
+        )
+    elif t == "impact":
+        fx.impact_card(
+            scene["text"], width, height, fps, out,
+            duration=dur, bg_color=scene.get("bg_color", "0xCC0000"),
+            fontsize=scene.get("fontsize", 220), text_color=scene.get("text_color", "white"),
         )
     else:
         raise ValueError(f"Unknown scene type: {t}")
@@ -154,7 +175,7 @@ def post_process(scene, base_path, work_dir):
     if grade:
         graded = work_dir / f"{scene['id']}_graded.mp4"
         if not _done(graded):
-            recipe = fx.WARM_GRADE if grade == "warm" else fx.SEPIA_GRADE
+            recipe = {"warm": fx.WARM_GRADE, "gritty": fx.GRITTY_GRADE}.get(grade, fx.SEPIA_GRADE)
             fx.apply_color_grade(current, graded, grade=recipe)
         current = graded
 
@@ -165,6 +186,16 @@ def post_process(scene, base_path, work_dir):
             fx.apply_grain_overlay(current, Path(grain), grained,
                                     opacity=scene.get("grain_opacity", 0.3))
         current = grained
+
+    # Synthetic grain (no external grain-footage file needed) -- separate
+    # from `grain` above since it's a self-contained noise filter, not an
+    # overlay clip.
+    grain_strength = scene.get("grain_strength")
+    if grain_strength:
+        noised = work_dir / f"{scene['id']}_noise.mp4"
+        if not _done(noised):
+            fx.apply_film_grain(current, noised, strength=grain_strength)
+        current = noised
 
     lt = scene.get("lower_third")
     if lt:

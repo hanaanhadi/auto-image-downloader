@@ -39,6 +39,14 @@ WARM_GRADE = (
     "colorbalance=rs=0.05:gs=0.03:bs=-0.02:rm=0.03:gm=0.01:bm=-0.01,"
     "vignette=PI/5:mode=backward"
 )
+# Heavier "war documentary" look (viral-spec reference): -35% saturation,
+# +15% contrast, darkened gamma, cool shadow push, heavier vignette. Use for
+# episodes that want a grimmer read than SEPIA_GRADE's warmer archive tone.
+GRITTY_GRADE = (
+    "eq=saturation=0.65:contrast=1.15:gamma=0.9:brightness=-0.04,"
+    "colorbalance=rs=-0.05:bs=0.08:rm=-0.02:bm=0.04,"
+    "vignette=PI/4:mode=backward:aspect=1"
+)
 
 
 def apply_color_grade(in_path, out_path, grade=SEPIA_GRADE):
@@ -78,6 +86,21 @@ def _probe_resolution(path):
     )
     w, h = [v for v in out.stdout.strip().split(",") if v][:2]
     return int(w), int(h)
+
+
+def apply_film_grain(in_path, out_path, strength=20):
+    """Synthetic per-frame film grain via ffmpeg's own noise generator --
+    no external grain-footage file needed (apply_grain_overlay below still
+    exists for when you *do* have a real scanned-grain clip to overlay).
+    `strength` ~ noise's alls value (spec's "18-22, temporal+uniform" maps
+    directly: temporal=t so it re-rolls every frame instead of looking static)."""
+    cmd = [
+        "ffmpeg", "-y", "-i", str(in_path),
+        "-vf", f"noise=alls={strength}:allf=t+u",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+        "-c:a", "copy", str(out_path),
+    ]
+    subprocess.run(cmd, check=True)
 
 
 def apply_grain_overlay(in_path, grain_path, out_path, opacity=0.3):
@@ -120,14 +143,20 @@ def _esc(path_or_text, is_path=False):
 
 
 def kinetic_typography(phrases, width, height, fps, out_path, duration=None,
-                        bg_color="black", fontsize=80, gap=0.5, hold=1.5,
+                        bg_color="black", bg_image=None, fontsize=80, gap=0.5, hold=1.5,
                         attribution=None):
     """Phrases appear one at a time, each staying on screen once revealed
     (word-by-word/phrase-by-phrase reveal, matching the production package's
     Step 5). `phrases` is a list of (text, fontcolor) tuples, stacked
     vertically, centered. Each phrase reveals `gap` seconds after the
     previous one; the whole thing holds for `hold` seconds after the last
-    phrase appears unless `duration` is given explicitly."""
+    phrase appears unless `duration` is given explicitly.
+
+    Default background is a solid color. Pass `bg_image` to run the quote
+    over a real photo instead -- filled/cropped to frame, darkened, and
+    given a slow Ken-Burns drift (same treatment as title_card's bg_image),
+    with a dark box behind the whole text block so a long phrase stack stays
+    legible over busy photo detail."""
     n = len(phrases)
     reveal_times = [0.3 + i * gap for i in range(n)]
     total_duration = duration or (reveal_times[-1] + hold)
@@ -142,6 +171,7 @@ def kinetic_typography(phrases, width, height, fps, out_path, duration=None,
         filters.append(
             f"drawtext=fontfile='{_esc(FONT_PATH, True)}':text='{_esc(text)}':"
             f"fontsize={fontsize}:fontcolor={color}:x=(w-text_w)/2:y={y}:"
+            f"borderw=2:bordercolor=black@0.8:"
             f"enable='gte(t,{reveal_times[i]:.2f})'"
         )
     if attribution:
@@ -150,13 +180,34 @@ def kinetic_typography(phrases, width, height, fps, out_path, duration=None,
             f"fontsize={int(fontsize * 0.45)}:fontcolor=gray:x=(w-text_w)/2:"
             f"y={start_y}+{n * line_height}+20:enable='gte(t,{reveal_times[-1] + 0.4:.2f})'"
         )
+    text_vf = ",".join(filters)
 
-    vf = ",".join(filters)
-    cmd = [
-        "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={total_duration:.3f}",
-        "-vf", vf, "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-crf", "18", "-an", str(out_path),
-    ]
+    if bg_image:
+        w2, h2 = width * 2, height * 2
+        pad = 40
+        box_y = f"(h-{total_text_height})/2-{pad}"
+        box_h = total_text_height + pad * 2
+        vf = (
+            f"scale={w2}:{h2}:force_original_aspect_ratio=increase,crop={w2}:{h2},"
+            f"eq=brightness=-0.32:saturation=0.65,"
+            f"zoompan=z='min(zoom+0.0006,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d={int(total_duration * fps)}:s={width}x{height}:fps={fps},setsar=1,"
+            f"drawbox=x=0:y={box_y}:w={width}:h={box_h}:color=black@0.45:t=fill,"
+            f"{text_vf}"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loop", "1", "-i", str(bg_image), "-t", f"{total_duration + 2:.3f}",
+            "-vf", vf, "-frames:v", str(int(total_duration * fps)),
+            "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "18", "-an", str(out_path),
+        ]
+    else:
+        vf = text_vf
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={total_duration:.3f}",
+            "-vf", vf, "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "18", "-an", str(out_path),
+        ]
     subprocess.run(cmd, check=True)
     return total_duration
 
@@ -263,22 +314,65 @@ def lower_third(video_path, line1, line2, out_path, start=1.0, hold=4.0,
 
 
 def title_card(title, subtitle, width, height, fps, out_path, duration=4.0,
-               bg_color="0x1a1a1a", title_fontsize=64, subtitle_fontsize=32,
+               bg_color="0x1a1a1a", bg_image=None, title_fontsize=64, subtitle_fontsize=32,
                subtitle_color="0xCC0000", fade=0.5):
-    """Full-screen section title card (package's Step 7 first example)."""
+    """Full-screen title + subtitle. Default is a solid background (package's
+    Step 7 first example); pass `bg_image` to open on a real photo instead --
+    filled/cropped to frame, darkened, and given a slow Ken-Burns drift so a
+    cold-open hook shows real footage instead of a blank card. A dark box
+    behind the text keeps it legible over busy photo detail either way."""
     on_start, on_end = fade, duration - fade
-    vf = (
+    text_vf = (
         f"drawtext=fontfile='{_esc(FONT_PATH, True)}':text='{_esc(title)}':"
         f"fontsize={title_fontsize}:fontcolor=white:x=(w-text_w)/2:y=h/2-40:"
+        f"borderw=3:bordercolor=black@0.8:"
         f"enable='between(t,{on_start},{on_end})'"
     )
     if subtitle:
-        vf += (
+        text_vf += (
             f",drawtext=fontfile='{_esc(FONT_PATH, True)}':text='{_esc(subtitle)}':"
             f"fontsize={subtitle_fontsize}:fontcolor={subtitle_color}:x=(w-text_w)/2:y=h/2+40:"
+            f"borderw=2:bordercolor=black@0.8:"
             f"enable='between(t,{on_start},{on_end})'"
         )
-    vf += f",fade=t=in:st=0:d={fade},fade=t=out:st={duration - fade}:d={fade}"
+
+    if bg_image:
+        w2, h2 = width * 2, height * 2
+        vf = (
+            f"scale={w2}:{h2}:force_original_aspect_ratio=increase,crop={w2}:{h2},"
+            f"eq=brightness=-0.25:saturation=0.7,"
+            f"zoompan=z='min(zoom+0.0006,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d={int(duration * fps)}:s={width}x{height}:fps={fps},setsar=1,"
+            f"drawbox=x=0:y={(height - 260) // 2}:w={width}:h=260:color=black@0.35:t=fill,"
+            f"{text_vf}"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loop", "1", "-i", str(bg_image), "-t", f"{duration + 2:.3f}",
+            "-vf", vf, "-frames:v", str(int(duration * fps)),
+            "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "18", "-an", str(out_path),
+        ]
+    else:
+        vf = text_vf + f",fade=t=in:st=0:d={fade},fade=t=out:st={duration - fade}:d={fade}"
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={duration:.3f}",
+            "-vf", vf, "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "18", "-an", str(out_path),
+        ]
+    subprocess.run(cmd, check=True)
+
+
+def impact_card(text, width, height, fps, out_path, duration=1.0,
+                 bg_color="0xCC0000", fontsize=220, text_color="white"):
+    """One-word (or short-phrase) full-bleed shock card -- "ERASED",
+    "TERRIFYING". No fade: text is on from frame 0 so the cut itself reads as
+    the hit. Keep `duration` short (~0.8-1.5s); the punch is in how briefly
+    it holds before the next scene's hardcut, not in the card itself."""
+    vf = (
+        f"drawtext=fontfile='{_esc(FONT_PATH, True)}':text='{_esc(text)}':"
+        f"fontsize={fontsize}:fontcolor={text_color}:x=(w-text_w)/2:y=(h-text_h)/2:"
+        f"borderw=4:bordercolor=black@0.6"
+    )
     cmd = [
         "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={duration:.3f}",
         "-vf", vf, "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p",
