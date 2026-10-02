@@ -23,23 +23,49 @@ def is_video(path):
     return path.suffix.lower() in VIDEO_EXTS
 
 # Each effect is a (zoom_expr, x_expr, y_expr) triple for the zoompan filter.
-# 'on' = output frame index (0-based), 'd' substituted with total frame count.
-# Zoom rate is scaled by 1/d so the motion spans the ENTIRE clip regardless of
-# its length -- a fixed per-frame increment would max out early on long clips
-# and leave the image frozen for the remainder.
+# 'on' = output frame index (0-based). Motion uses smoothstep easing
+# (ease-in-out) instead of linear steps -- linear motion reads as cheap
+# slideshow; eased motion reads as a deliberate camera move, which is the
+# single biggest "cinematic feel" upgrade for stills.
+def _smooth(p):
+    # smoothstep ease-in-out over a 0..1 progress expression p
+    return f"(({p})*({p})*(3-2*({p})))"
+
 EFFECTS = [
-    # zoom in, centered
-    lambda d: (f"min(zoom+(0.16/{max(d, 1)}),1.16)", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
-    # zoom out, centered
-    lambda d: (f"if(eq(on,0),1.16,max(zoom-(0.16/{max(d, 1)}),1.0))", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
-    # pan left -> right (fixed zoom)
-    lambda d: ("1.14", f"(iw-iw/zoom)*(on/{max(d-1,1)})", "ih/2-(ih/zoom/2)"),
-    # pan right -> left (fixed zoom)
-    lambda d: ("1.14", f"(iw-iw/zoom)*(1-on/{max(d-1,1)})", "ih/2-(ih/zoom/2)"),
-    # pan top -> bottom (fixed zoom)
-    lambda d: ("1.14", "iw/2-(iw/zoom/2)", f"(ih-ih/zoom)*(on/{max(d-1,1)})"),
-    # pan bottom -> top (fixed zoom)
-    lambda d: ("1.14", "iw/2-(iw/zoom/2)", f"(ih-ih/zoom)*(1-on/{max(d-1,1)})"),
+    # zoom in, centered (eased)
+    lambda d: (
+        f"1+0.16*{_smooth(f'on/{max(d - 1, 1)}')}",
+        "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)",
+    ),
+    # zoom out, centered (eased)
+    lambda d: (
+        f"1.16-0.16*{_smooth(f'on/{max(d - 1, 1)}')}",
+        "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)",
+    ),
+    # pan left -> right (fixed zoom, eased)
+    lambda d: (
+        "1.14",
+        f"(iw-iw/zoom)*{_smooth(f'on/{max(d - 1, 1)}')}",
+        "ih/2-(ih/zoom/2)",
+    ),
+    # pan right -> left (fixed zoom, eased)
+    lambda d: (
+        "1.14",
+        f"(iw-iw/zoom)*(1-{_smooth(f'on/{max(d - 1, 1)}')})",
+        "ih/2-(ih/zoom/2)",
+    ),
+    # pan top -> bottom (fixed zoom, eased)
+    lambda d: (
+        "1.14",
+        "iw/2-(iw/zoom/2)",
+        f"(ih-ih/zoom)*{_smooth(f'on/{max(d - 1, 1)}')}",
+    ),
+    # pan bottom -> top (fixed zoom, eased)
+    lambda d: (
+        "1.14",
+        "iw/2-(iw/zoom/2)",
+        f"(ih-ih/zoom)*(1-{_smooth(f'on/{max(d - 1, 1)}')})",
+    ),
 ]
 
 # Documentary editing convention: soft blends/dissolves, cycled for variety --
@@ -111,16 +137,31 @@ def load_manifest(manifest_path):
 
 
 # Subtle, uniform "documentary" grade applied to every clip -- slightly
-# desaturated, faint warm tone, a touch more contrast. Ties together a mixed
-# pool of full-color modern photos and B&W archival scans into one
-# consistent look, instead of jarring swings between them.
+# desaturated, faint warm tone, a touch more contrast, plus a gentle S-curve
+# for a filmic highlight rolloff. Ties together a mixed pool of full-color
+# modern photos and B&W archival scans into one consistent look, instead of
+# jarring swings between them.
 COLOR_GRADE = (
     "eq=saturation=0.88:contrast=1.06:brightness=0.01,"
-    "colorbalance=rs=0.04:gs=0.00:bs=-0.05:rm=0.03:gm=0.00:bm=-0.04:rh=0.02:gh=0.00:bh=-0.03"
+    "colorbalance=rs=0.04:gs=0.00:bs=-0.05:rm=0.03:gm=0.00:bm=-0.04:rh=0.02:gh=0.00:bh=-0.03,"
+    "curves=m='0/0 0.45/0.47 1/1'"
 )
 
+# Cinematic finish -- applied after the grade, on by default:
+# a soft vignette to focus the eye, and fine temporal film grain to kill the
+# sterile digital look. Both are subtle; disable with --no-vignette /
+# --no-film-grain if a clip needs to stay perfectly clean.
+def cinematic_finish(vignette=True, film_grain=True):
+    parts = []
+    if vignette:
+        parts.append("vignette=a=PI/4.6")
+    if film_grain:
+        parts.append("noise=alls=6:allf=t")
+    return ",".join(parts)
 
-def render_image_clip(image_path, frames, effect_idx, width, height, fps, out_path, color_grade=True):
+
+def render_image_clip(image_path, frames, effect_idx, width, height, fps, out_path,
+                      color_grade=True, vignette=True, film_grain=True):
     z_expr, x_expr, y_expr = EFFECTS[effect_idx % len(EFFECTS)](frames)
     w2, h2 = width * 2, height * 2
     # Portrait/text-caption images (common for hero graphics) would lose
@@ -139,6 +180,9 @@ def render_image_clip(image_path, frames, effect_idx, width, height, fps, out_pa
     )
     if color_grade:
         vf += "," + COLOR_GRADE
+    finish = cinematic_finish(vignette=vignette, film_grain=film_grain)
+    if finish:
+        vf += "," + finish
     # Generous -t so the loop always has enough source frames; -frames:v pins
     # the exact output frame count so piece durations are frame-accurate.
     cmd = [
@@ -151,7 +195,8 @@ def render_image_clip(image_path, frames, effect_idx, width, height, fps, out_pa
 
 
 def render_video_clip(video_path, frames, width, height, fps, out_path, color_grade=True,
-                       start_offset=0.0, crop_bottom_frac=0.0):
+                      start_offset=0.0, crop_bottom_frac=0.0,
+                      vignette=True, film_grain=True):
     """Real footage already has its own motion, but a static crop still reads
     as "inserted stock clip" rather than an intentional shot -- so add a slow,
     steady 6% reframing zoom on top (gentler than the stills' Ken Burns, since
@@ -186,6 +231,9 @@ def render_video_clip(video_path, frames, width, height, fps, out_path, color_gr
     )
     if color_grade:
         vf += "," + COLOR_GRADE
+    finish = cinematic_finish(vignette=vignette, film_grain=film_grain)
+    if finish:
+        vf += "," + finish
     cmd = [
         "ffmpeg", "-y", "-stream_loop", "-1",
     ]
@@ -302,7 +350,11 @@ def composite_video_chain(inputs, clip_frames, trans_frames, fps, out_path, work
     # Pieces/batches can carry slightly different color-range/matrix tags,
     # which makes xfade silently upconvert the blend to yuv444p if the
     # output format isn't pinned -- force standard yuv420p explicitly.
+    # Audio is loudness-normalized to YouTube's -14 LUFS target so narration
+    # sits at a consistent level across episodes and devices.
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p"]
+    if audio_path:
+        cmd += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
     cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"] if audio_path else ["-an"]
     cmd += [str(out_path)]
 
@@ -328,6 +380,10 @@ def main():
                      help="Where to put per-image temp clips (default: <output_dir>/slideshow_pieces)")
     ap.add_argument("--no-color-grade", action="store_true",
                      help="Skip the unified documentary color grade (subtle desaturation + warm tone).")
+    ap.add_argument("--no-vignette", action="store_true",
+                     help="Skip the soft cinematic vignette.")
+    ap.add_argument("--no-film-grain", action="store_true",
+                     help="Skip the subtle film grain finish.")
     ap.add_argument("--batch-size", type=int, default=10,
                      help="Composite pieces in batches of this size, chaining the batch outputs "
                           "together at the end, instead of one giant crossfade chain (default 10). "
@@ -366,12 +422,16 @@ def main():
                   f"{clip_frames[i]} frames) -> {piece.name}")
             render_video_clip(img, clip_frames[i], args.width, args.height, fps, piece,
                                color_grade=not args.no_color_grade,
-                               start_offset=start_offset, crop_bottom_frac=crop_bottom)
+                               start_offset=start_offset, crop_bottom_frac=crop_bottom,
+                               vignette=not args.no_vignette,
+                               film_grain=not args.no_film_grain)
         else:
             print(f"[{i+1}/{n}] rendering {img.name} (effect {i % len(EFFECTS)}, "
                   f"{clip_frames[i]} frames) -> {piece.name}")
             render_image_clip(img, clip_frames[i], i, args.width, args.height, fps, piece,
-                               color_grade=not args.no_color_grade)
+                               color_grade=not args.no_color_grade,
+                               vignette=not args.no_vignette,
+                               film_grain=not args.no_film_grain)
 
     if n <= args.batch_size:
         composite_video_chain(piece_paths, clip_frames, trans_frames, fps, out_path, work_dir,
